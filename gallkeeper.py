@@ -7,6 +7,7 @@ Created on Wed Jan 26 03:53:10 2022
 
 from pathlib import Path
 import sys
+import json
 
 API_REPO_DIR = Path(__file__).resolve().parents[1] / "api_repo"
 if API_REPO_DIR.is_dir():
@@ -17,11 +18,14 @@ import asyncio
 import pandas as pd
 import requests
 from types import SimpleNamespace
+import time
+from datetime import datetime
 from gallkeeper_cfg import GallKeeperConfig, get_public_ip
 from dc_board import Board, split_author_display
 from dc_comments import Comments
 from mirror_cache import MirrorCache
 from moderation import ModerationMatcher
+from write_guard import WriteGuard
 from moderation_action import (
     ENDPOINT as MODERATION_ACTION_ENDPOINT,
     PC_HEADERS,
@@ -76,6 +80,10 @@ class GallKeeper():
         self.moderation_cache = None
         self.moderation_matcher = None
         self.relevance_scorer = None
+        self.write_guard = None
+        self.write_pause_notice_keys = set()
+        self.alert_notice_times = {}
+        self.moderation_auto_action_paused_until = 0
         self.get_config(file_config)
 
     async def run(self, max_cycles=None, interval_seconds=10):
@@ -93,9 +101,15 @@ class GallKeeper():
                 continue
             
             if(self.doc_write):
-                print("({}) writing doc ... ".format(self.board_id), end="")
                 if(not self.has_doc_write_post()):
-                    if self.dry_run:
+                    if self.print_write_paused_once(
+                        "write_document",
+                        self.board_id,
+                        "({}) writing doc ... ".format(self.board_id),
+                    ):
+                        pass
+                    elif self.dry_run:
+                        print("({}) writing doc ... ".format(self.board_id), end="")
                         write_name = self.get_doc_write_name()
                         write_contents = self.get_doc_write_contents()
                         print("[dry-run] would write doc backend={} name={!r} title={!r} contents_len={}".format(
@@ -105,10 +119,16 @@ class GallKeeper():
                             len(write_contents),
                         ))
                     else:
-                        doc_id = await self.write_document()
-                        print("done doc_id={}".format(doc_id))
+                        print("({}) writing doc ... ".format(self.board_id), end="")
+                        try:
+                            doc_id = await self.write_document()
+                            print("done doc_id={}".format(doc_id))
+                        except Exception as exc:
+                            print("failed: {!r}".format(exc))
+                            if max_cycles is not None:
+                                raise
                 else:
-                    print("wait!")
+                    print("({}) writing doc ... wait!".format(self.board_id))
 
             if self.has_moderation_rules():
                 get_contents = True
@@ -160,7 +180,9 @@ class GallKeeper():
                             if(self.comments.isAuthorExists(self.author)):
                                 print("already done")
                             else:
-                                if self.dry_run:
+                                if self.print_write_paused_once("write_comment", self.board_id):
+                                    pass
+                                elif self.dry_run:
                                     print("[dry-run] would write comment")
                                 else:
                                     try:
@@ -196,7 +218,9 @@ class GallKeeper():
                                 print("already mirrored doc_id={}".format(existing_mirror_doc_id))
                                 print("done")
                                 continue
-                            if self.dry_run:
+                            if self.print_write_paused_once("mirror_write", self.mirror_target_board_id):
+                                pass
+                            elif self.dry_run:
                                 print("[dry-run] would mirror author={!r} title={!r} contents={!r}".format(author, title, contents))
                             else:
                                 try:
@@ -278,6 +302,16 @@ class GallKeeper():
         self.moderation_auto_action_allow_galleries = self.cfg.moderation_auto_action_allow_galleries
         self.moderation_auto_action_limit_per_cycle = int(self.cfg.moderation_auto_action_limit_per_cycle)
         self.moderation_auto_action_limit_per_day = int(self.cfg.moderation_auto_action_limit_per_day)
+        self.moderation_auto_action_session_retry_seconds = int(
+            self.cfg.moderation_auto_action_session_retry_seconds
+        )
+        self.write_guard_file = self.cfg.write_guard_file
+        self.write_guard = WriteGuard(
+            self.write_guard_file,
+            default_pause_minutes=self.cfg.write_guard_default_pause_minutes,
+        )
+        self.alert_event_file = self.cfg.alert_event_file
+        self.alert_repeat_seconds = int(self.cfg.alert_repeat_seconds)
         if self.mirror or self.mirror_cleanup or self.mirror_relevance_monitor:
             self.mirror_cache = MirrorCache(self.mirror_cache_file)
         if self.moderation_monitor:
@@ -300,6 +334,66 @@ class GallKeeper():
         if self.moderation_matcher is None:
             return False
         return self.moderation_matcher.has_rules()
+
+    def require_write_allowed(self, action_type, board_id=None):
+        if self.write_guard is None:
+            return
+        self.write_guard.require_allowed(action_type, board_id or self.board_id)
+
+    def record_write_success(self, action_type, board_id=None):
+        if self.write_guard is None:
+            return
+        self.write_guard.record_success(action_type, board_id or self.board_id)
+
+    def record_write_failure(self, action_type, board_id, exc):
+        if self.write_guard is None:
+            return
+        signal = self.write_guard.record_failure(action_type, board_id or self.board_id, exc)
+        if signal.should_pause:
+            self.write_pause_notice_keys.clear()
+            print(
+                "write guard paused category={} until={} ".format(
+                    signal.category,
+                    signal.pause_until,
+                ),
+                end="",
+            )
+            self.emit_alert(
+                "write_guard_paused",
+                "Bot write guard paused {} until {}".format(signal.category, signal.pause_until),
+                {
+                    "board_id": board_id or self.board_id,
+                    "action_type": action_type,
+                    "category": signal.category,
+                    "pause_until": signal.pause_until,
+                    "message": signal.message,
+                },
+            )
+
+    def current_write_pause(self):
+        if self.write_guard is None:
+            return None
+        return self.write_guard.current_pause()
+
+    def print_write_paused_once(self, action_type, board_id=None, prefix=""):
+        pause = self.current_write_pause()
+        if pause is None:
+            return False
+        key = (
+            action_type,
+            board_id or self.board_id,
+            pause["paused_until"],
+            pause["category"],
+        )
+        if key not in self.write_pause_notice_keys:
+            self.write_pause_notice_keys.add(key)
+            print("{}paused until {} category={} message={!r}".format(
+                prefix,
+                pause["paused_until"],
+                pause["category"],
+                pause["message"],
+            ))
+        return True
 
     async def record_moderation_candidates(self, row):
         if self.moderation_cache is None or self.moderation_matcher is None:
@@ -328,6 +422,8 @@ class GallKeeper():
     def run_auto_moderation_actions(self):
         if not self.moderation_auto_action or self.moderation_cache is None:
             return
+        if self.moderation_auto_action_paused_until > time.time():
+            return
         if self.board_id not in self.moderation_auto_action_allow_galleries:
             print("auto moderation skipped: gallery not allowed ", end="")
             return
@@ -353,6 +449,50 @@ class GallKeeper():
                     candidate["id"],
                     exc,
                 ), end="")
+                if self.is_manager_session_error(exc):
+                    self.pause_auto_moderation_session(exc)
+                    break
+
+    def is_manager_session_error(self, exc):
+        message = str(exc)
+        return (
+            "manager markers were not found" in message
+            or "ci_c cookie was not found" in message
+            or "정상적인 접근이 아닙니다" in message
+        )
+
+    def pause_auto_moderation_session(self, exc):
+        seconds = max(1, self.moderation_auto_action_session_retry_seconds)
+        self.moderation_auto_action_paused_until = time.time() + seconds
+        print("auto moderation session paused {}s: {!r} ".format(seconds, exc), end="")
+        self.emit_alert(
+            "manager_session_error",
+            "Manager moderation session is not usable",
+            {
+                "board_id": self.board_id,
+                "retry_seconds": seconds,
+                "error": str(exc),
+            },
+        )
+
+    def emit_alert(self, kind, message, details=None):
+        now = time.time()
+        details = details or {}
+        key = (kind, details.get("board_id", ""), details.get("category", ""))
+        last_sent = self.alert_notice_times.get(key, 0)
+        if now - last_sent < self.alert_repeat_seconds:
+            return
+        self.alert_notice_times[key] = now
+        event = {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "kind": kind,
+            "message": message,
+            "details": details,
+        }
+        path = Path(self.alert_event_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
 
     def run_auto_moderation_action(self, candidate):
         if self.dry_run:
@@ -707,46 +847,67 @@ class GallKeeper():
         name     = self.get_doc_write_name() if name is None else name
         title    = self.doc_title    if title    is None else title
         contents = self.get_doc_write_contents() if contents is None else contents
-        
+        action_type = "write_document_pc" if self.doc_write_backend == "pc" else "write_document_mobile"
+        self.require_write_allowed(action_type, board_id)
+
         async with dc_api.API() as api:
-            if self.doc_write_backend == "pc":
-                doc_id = await api.write_document_pc(
-                                   board_id=board_id,
-                                   name=name,
-                                   password=self.password,
-                                   title=title,
-                                   contents=contents,
-                                   use_html=self.doc_write_pc_use_html)
-            else:
-                doc_id = await api.write_document(
-                                   board_id=board_id,
-                                   name=name,
-                                   password=self.password,
-                                   title=title,
-                                   contents=contents,
-                                   is_minor=board_minor)
+            try:
+                if self.doc_write_backend == "pc":
+                    doc_id = await api.write_document_pc(
+                                       board_id=board_id,
+                                       name=name,
+                                       password=self.password,
+                                       title=title,
+                                       contents=contents,
+                                       use_html=self.doc_write_pc_use_html)
+                else:
+                    doc_id = await api.write_document(
+                                       board_id=board_id,
+                                       name=name,
+                                       password=self.password,
+                                       title=title,
+                                       contents=contents,
+                                       is_minor=board_minor)
+            except Exception as exc:
+                self.record_write_failure(action_type, board_id, exc)
+                raise
+        self.record_write_success(action_type, board_id)
         return doc_id
 
     async def remove_document(self, board_id, document_id, is_minor=False, password=None):
         password = self.password if password is None else password
+        self.require_write_allowed("remove_document", board_id)
         async with dc_api.API() as api:
-            return await api.remove_document(
-                board_id=board_id,
-                document_id=document_id,
-                password=password,
-                is_minor=is_minor,
-            )
+            try:
+                result = await api.remove_document(
+                    board_id=board_id,
+                    document_id=document_id,
+                    password=password,
+                    is_minor=is_minor,
+                )
+            except Exception as exc:
+                self.record_write_failure("remove_document", board_id, exc)
+                raise
+        self.record_write_success("remove_document", board_id)
+        return result
 
     async def modify_document(self, board_id, document_id, title, contents, password=None):
         password = self.password if password is None else password
+        self.require_write_allowed("modify_document_pc", board_id)
         async with dc_api.API() as api:
-            return await api.modify_document_pc(
-                board_id=board_id,
-                document_id=document_id,
-                title=title,
-                contents=contents,
-                password=password,
-            )
+            try:
+                result = await api.modify_document_pc(
+                    board_id=board_id,
+                    document_id=document_id,
+                    title=title,
+                    contents=contents,
+                    password=password,
+                )
+            except Exception as exc:
+                self.record_write_failure("modify_document_pc", board_id, exc)
+                raise
+        self.record_write_success("modify_document_pc", board_id)
+        return result
 
     async def get_document(self, doc_id, board_id=None):
         board_id = self.board_id if board_id is None else board_id
@@ -759,11 +920,17 @@ class GallKeeper():
         name     = self.nick             if name     is None else name
         contents = self.comment_contents if contents is None else contents
 
+        self.require_write_allowed("write_comment", self.board_id)
         async with dc_api.API() as api:
-            com_id = await api.write_comment \
-                               (board_id=self.board_id, document_id=doc_id, 
-                                name=name, password=self.password,
-                                contents=contents)
+            try:
+                com_id = await api.write_comment \
+                                   (board_id=self.board_id, document_id=doc_id,
+                                    name=name, password=self.password,
+                                    contents=contents)
+            except Exception as exc:
+                self.record_write_failure("write_comment", self.board_id, exc)
+                raise
+        self.record_write_success("write_comment", self.board_id)
         return com_id
     
     async def get_comments(self, board_id=None, doc_id=-1):

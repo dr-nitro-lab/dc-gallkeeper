@@ -74,6 +74,8 @@ pip install git+https://github.com/dr-nitro-lab/dcinside-python3-api.git@master
 
 `gallkeeper_main.py`는 `conf/gall_conf_list.local.yaml`이 있으면 이 파일을 먼저 사용하고, 없으면 `conf/gall_conf_list.yaml`을 사용한다.
 
+`write_guard_file`은 글쓰기 안전 상태를 저장하는 sqlite 파일이다. 디시인사이드 글쓰기 응답에서 IP 차단, 비정상 접근, 도배 제한으로 보이는 팝업/alert 문구가 감지되면 원문 메시지와 정지 시간을 기록하고, 미러링/안내글/댓글/수정/삭제 같은 쓰기 작업을 일시 정지한다.
+
 키워드 기반 규칙은 시행착오가 필요한 영역이므로 기본값은 `review`와 `auto_action: false`로 둔다. 자동 실행은 충분히 검증된 작성자 exact rule 또는 매우 확실한 금지 문구에만 제한적으로 켠다.
 
 운영 보조 자동 실행은 기본적으로 꺼져 있다. 자동 실행을 쓰려면 갤러리 설정의 `moderation_auto_action`과 규칙의 `auto_action`을 모두 켜고, `moderation_auto_action_allow_galleries`에 대상 갤러리를 명시해야 한다.
@@ -91,6 +93,7 @@ pip install git+https://github.com/dr-nitro-lab/dcinside-python3-api.git@master
 - PC 웹 경로를 이용한 글 수정
 - 미러링 중복 방지를 위한 로컬 sqlite 캐시
 - 원글 삭제 또는 수정 여부 확인 후 미러글 정리
+- 글쓰기 차단 팝업/alert 감지 후 쓰기 작업 일시 정지
 
 추가로 확인 중인 영역:
 

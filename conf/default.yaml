@@ -25,6 +25,11 @@ mirror: False
 mirror_target_board_id: jazz
 mirror_target_board_minor: False
 
+write_guard_file: caches/write_guard.sqlite
+write_guard_default_pause_minutes: 30
+alert_event_file: caches/alerts.jsonl
+alert_repeat_seconds: 1800
+
 moderation_monitor: False
 moderation_scan_comments: False
 moderation_cache_file: caches/moderation_candidates.sqlite
@@ -35,3 +40,4 @@ moderation_auto_action_cookie_file: conf/dcinside_cookies.json
 moderation_auto_action_allow_galleries: []
 moderation_auto_action_limit_per_cycle: 1
 moderation_auto_action_limit_per_day: 10
+moderation_auto_action_session_retry_seconds: 60

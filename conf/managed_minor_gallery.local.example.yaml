@@ -34,6 +34,11 @@ mirror: False
 mirror_target_board_id:
 mirror_target_board_minor: False
 
+write_guard_file: caches/write_guard.sqlite
+write_guard_default_pause_minutes: 30
+alert_event_file: caches/alerts.jsonl
+alert_repeat_seconds: 1800
+
 # moderation_monitor: True scans recent articles for moderation rules.
 moderation_monitor: True
 # moderation_scan_comments: True also fetches comments for scanned articles.
@@ -54,3 +59,5 @@ moderation_auto_action_allow_galleries:
 moderation_auto_action_limit_per_cycle: 1
 # moderation_auto_action_limit_per_day: max successful automatic actions in 24h.
 moderation_auto_action_limit_per_day: 10
+# moderation_auto_action_session_retry_seconds: retry delay after login/session failure.
+moderation_auto_action_session_retry_seconds: 60

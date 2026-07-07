@@ -106,6 +106,10 @@ class GallKeeperConfig():
         self.mirror_relevance_positive_keywords = config.get('mirror_relevance_positive_keywords', {})
         self.mirror_relevance_negative_keywords = config.get('mirror_relevance_negative_keywords', {})
         self.mirror_relevance_context_keywords = config.get('mirror_relevance_context_keywords', {})
+        self.write_guard_file = config.get('write_guard_file', 'caches/write_guard.sqlite')
+        self.write_guard_default_pause_minutes = config.get('write_guard_default_pause_minutes', 30)
+        self.alert_event_file = config.get('alert_event_file', 'caches/alerts.jsonl')
+        self.alert_repeat_seconds = config.get('alert_repeat_seconds', 1800)
         self.moderation_monitor = config.get('moderation_monitor', False)
         self.moderation_scan_comments = config.get('moderation_scan_comments', False)
         self.moderation_cache_file = config.get('moderation_cache_file', 'caches/moderation_candidates.sqlite')
@@ -127,6 +131,10 @@ class GallKeeperConfig():
         self.moderation_auto_action_limit_per_day = config.get(
             'moderation_auto_action_limit_per_day',
             10,
+        )
+        self.moderation_auto_action_session_retry_seconds = config.get(
+            'moderation_auto_action_session_retry_seconds',
+            60,
         )
         if self.moderation_rules_file:
             rules_path = p.parent / self.moderation_rules_file

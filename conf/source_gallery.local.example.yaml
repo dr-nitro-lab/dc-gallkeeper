@@ -78,3 +78,12 @@ mirror_relevance_contents_multiplier: 1
 mirror_relevance_positive_keywords: {}
 mirror_relevance_negative_keywords: {}
 mirror_relevance_context_keywords: {}
+
+# write_guard_file: sqlite state shared by all configs. If DCInside reports an
+# IP/write block popup, write-like actions pause until the parsed expiry.
+write_guard_file: caches/write_guard.sqlite
+# write_guard_default_pause_minutes: fallback pause when the popup is block-like
+# but no expiry time can be parsed.
+write_guard_default_pause_minutes: 30
+alert_event_file: caches/alerts.jsonl
+alert_repeat_seconds: 1800

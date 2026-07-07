@@ -25,3 +25,8 @@ comment_contents: default_comm_contents.txt
 mirror: False
 mirror_target_board_id:
 mirror_target_board_minor: False
+
+write_guard_file: caches/write_guard.sqlite
+write_guard_default_pause_minutes: 30
+alert_event_file: caches/alerts.jsonl
+alert_repeat_seconds: 1800
